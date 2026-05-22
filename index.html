@@ -421,9 +421,11 @@ function migrateState(raw){
   if(!s.cycle.days) s.cycle.days=14;
   if(!s.cycle.start) s.cycle.start=todayKey();
 
+  normalizeFoodLibrary(s.foodLibrary);
+  normalizePlanItems(s.plan, s.foodLibrary);
   ensureMealShares(s.plan);
   syncCycleGramsFromPct(s.cycle);
-  s.dataVersion = s.dataVersion || 1;
+  s.dataVersion = 2;
   return s;
 }
 function load(){
@@ -434,6 +436,100 @@ function load(){
   return migrateState(clone(defaultState));
 }
 function persist(){ localStorage.setItem(KEY, JSON.stringify(state)); }
+function getFoodPer100(food){
+  return {
+    kcal:n(food?.kcalPer100),
+    protein:n(food?.proteinPer100 ?? food?.pPer100),
+    carbs:n(food?.carbsPer100 ?? food?.cPer100),
+    fat:n(food?.fatPer100 ?? food?.fPer100)
+  };
+}
+function hasPer100(food){ const p=getFoodPer100(food); return !!(p.kcal||p.protein||p.carbs||p.fat); }
+function applyFoodAliases(food){
+  if(!food) return food;
+  food.category = food.category || food.cat || '自定义';
+  food.cat = food.cat || food.category;
+  food.defaultAmount = n(food.defaultAmount || food.qty || 100);
+  food.defaultUnit = food.defaultUnit || food.unit || 'g';
+  food.qty = food.qty || food.defaultAmount;
+  food.unit = food.unit || food.defaultUnit;
+  food.protein = n(food.protein ?? food.p);
+  food.carbs = n(food.carbs ?? food.c);
+  food.fat = n(food.fat ?? food.f);
+  food.p = n(food.p ?? food.protein);
+  food.c = n(food.c ?? food.carbs);
+  food.f = n(food.f ?? food.fat);
+  food.kcal = n(food.kcal);
+  if(food.pPer100!==undefined && food.proteinPer100===undefined) food.proteinPer100=n(food.pPer100);
+  if(food.cPer100!==undefined && food.carbsPer100===undefined) food.carbsPer100=n(food.cPer100);
+  if(food.fPer100!==undefined && food.fatPer100===undefined) food.fatPer100=n(food.fPer100);
+  if(food.proteinPer100!==undefined) food.pPer100=n(food.proteinPer100);
+  if(food.carbsPer100!==undefined) food.cPer100=n(food.carbsPer100);
+  if(food.fatPer100!==undefined) food.fPer100=n(food.fatPer100);
+  if(food.kcalPer100!==undefined) food.kcalPer100=n(food.kcalPer100);
+  if(!hasPer100(food) && isGramUnit(food.unit) && n(food.qty)>0){
+    food.kcalPer100=round1(n(food.kcal)*100/n(food.qty));
+    food.proteinPer100=round1(n(food.p)*100/n(food.qty));
+    food.carbsPer100=round1(n(food.c)*100/n(food.qty));
+    food.fatPer100=round1(n(food.f)*100/n(food.qty));
+    food.pPer100=food.proteinPer100;
+    food.cPer100=food.carbsPer100;
+    food.fPer100=food.fatPer100;
+  }
+  food.unitMode = food.unitMode || (hasPer100(food) ? 'per100g' : 'manual');
+  food.updatedAt = food.updatedAt || new Date().toISOString();
+  return food;
+}
+function applyItemAliases(item){
+  if(!item) return item;
+  item.amount = n(item.amount ?? item.qty);
+  item.qty = item.qty || item.amount;
+  item.unit = item.unit || 'g';
+  item.protein = n(item.protein ?? item.p);
+  item.carbs = n(item.carbs ?? item.c);
+  item.fat = n(item.fat ?? item.f);
+  item.p = n(item.p ?? item.protein);
+  item.c = n(item.c ?? item.carbs);
+  item.f = n(item.f ?? item.fat);
+  item.kcal = n(item.kcal);
+  if(item.foodLibraryId===undefined) item.foodLibraryId = item.libraryId || '';
+  return item;
+}
+function normalizeFoodLibrary(lib){ (lib||[]).forEach(applyFoodAliases); }
+function normalizePlanItems(plan, lib=[]){
+  (plan||[]).forEach(meal=>(meal.items||[]).forEach(item=>{
+    applyItemAliases(item);
+    if(!item.foodLibraryId){
+      const match=(lib||[]).find(f=>f.name===item.name);
+      if(match) item.foodLibraryId=match.id;
+    }
+  }));
+}
+function calcFromPer100(per, grams){
+  const g=n(grams);
+  return {kcal:Math.max(0,Math.round(n(per.kcal)*g/100)), protein:Math.max(0,round1(n(per.protein)*g/100)), carbs:Math.max(0,round1(n(per.carbs)*g/100)), fat:Math.max(0,round1(n(per.fat)*g/100))};
+}
+function calcItemFromLibrary(food, amount){
+  food=applyFoodAliases(food);
+  const qty=round2(n(amount || food.defaultAmount || food.qty || 0));
+  const unit=food.defaultUnit || food.unit || 'g';
+  if(food.unitMode==='per100g' && isGramUnit(unit) && hasPer100(food)){
+    const v=calcFromPer100(getFoodPer100(food), qty);
+    return {qty, amount:qty, unit, kcal:v.kcal, p:v.protein, c:v.carbs, f:v.fat, protein:v.protein, carbs:v.carbs, fat:v.fat};
+  }
+  const base=n(food.defaultAmount || food.qty);
+  if(base>0 && qty!==base){
+    const ratio=qty/base;
+    const v={kcal:Math.round(n(food.kcal)*ratio), protein:round1(n(food.p)*ratio), carbs:round1(n(food.c)*ratio), fat:round1(n(food.f)*ratio)};
+    return {qty, amount:qty, unit, kcal:v.kcal, p:v.protein, c:v.carbs, f:v.fat, protein:v.protein, carbs:v.carbs, fat:v.fat};
+  }
+  return {qty, amount:qty, unit, kcal:n(food.kcal), p:n(food.p), c:n(food.c), f:n(food.f), protein:n(food.p), carbs:n(food.c), fat:n(food.f)};
+}
+function recalcPlanItemFromLibrary(item, food){
+  const next=calcItemFromLibrary(food, item.amount || item.qty);
+  Object.assign(item,next,{foodLibraryId:food.id,name:food.name});
+  return item;
+}
 function getToday(){
   const k=todayKey();
   if(!state.days[k]){
@@ -587,7 +683,7 @@ function scaleItemByQty(item,newQty){
   const oldQty=n(item.qty);
   if(oldQty<=0) return;
   const ratio=Math.max(0,n(newQty))/oldQty;
-  item.qty=round1(Math.max(0,n(newQty)));
+  item.qty=round2(Math.max(0,n(newQty)));
   item.kcal=Math.max(0,Math.round(n(item.kcal)*ratio));
   item.p=Math.max(0,round1(n(item.p)*ratio));
   item.c=Math.max(0,round1(n(item.c)*ratio));
@@ -1184,8 +1280,8 @@ function renderLibrary(){
         <div class="listItem">
           <div class="row">
             <div>
-              <div class="title">${esc(food.name)} <span class="badge">${food.qty}${esc(food.unit)}</span></div>
-              <div class="meta">${food.kcal} kcal｜P${food.p} C${food.c} F${food.f}</div>
+              <div class="title">${esc(food.name)} <span class="badge">${food.defaultAmount||food.qty}${esc(food.defaultUnit||food.unit)}</span> <span class="badge ${food.unitMode==='per100g'?'green':'orange'}">${food.unitMode==='per100g'?'每100g已保存':'手动估算'}</span></div>
+              <div class="meta">默认 ${food.kcal} kcal｜P${food.p} C${food.c} F${food.f}${food.unitMode==='per100g'?`｜每100g ${food.kcalPer100} kcal P${food.proteinPer100||food.pPer100} C${food.carbsPer100||food.cPer100} F${food.fatPer100||food.fPer100}`:''}</div>
             </div>
             <div class="smallBtns">
               <button class="editBtn" onclick="openAddFromLibraryModal('${food.id}')">加入</button>
@@ -1196,45 +1292,61 @@ function renderLibrary(){
     </div>`).join('') || '<p class="note">还没有食材库。</p>';
 }
 function openAddFromLibraryModal(libId){
-  const food=(state.foodLibrary||[]).find(x=>x.id===libId); if(!food) return;
+  const food=applyFoodAliases((state.foodLibrary||[]).find(x=>x.id===libId)); if(!food) return;
+  const current=calcItemFromLibrary(food, food.defaultAmount || food.qty);
   openModal(`<h3>加入到哪一餐？</h3>
-    <p class="note">会复制一份到周期食谱里，之后你可以单独改这份克数和营养参数。</p>
+    <p class="note">食材库参数会一起带入。以后改实际克数时，如果这是每100g食材，会自动重算营养。</p>
     <div class="formGrid">
       <div class="inputWrap full"><label>食材</label><input value="${esc(food.name)}" readonly></div>
       <div class="inputWrap full"><label>目标餐次</label><select id="addLibMeal">${state.plan.map(m=>`<option value="${m.id}">${esc(m.name)}</option>`).join('')}</select></div>
-      ${field('数量','addLibQty',food.qty,'number')}
-      ${field('单位','addLibUnit',food.unit,'text')}
-      ${field('热量 kcal','addLibKcal',food.kcal,'number')}
-      ${field('蛋白 g','addLibP',food.p,'number')}
-      ${field('碳水 g','addLibC',food.c,'number')}
-      ${field('脂肪 g','addLibF',food.f,'number')}
+      <div class="inputWrap"><label>实际吃多少</label><input id="addLibQty" type="number" value="${esc(current.qty)}" oninput="previewAddFromLibrary('${libId}')"></div>
+      <div class="inputWrap"><label>单位</label><input id="addLibUnit" value="${esc(current.unit)}" readonly></div>
     </div>
+    <div id="addLibPreview" class="balanceBox" style="background:#ecfdf5;border-color:#bbf7d0;margin-top:10px"></div>
     <div class="grid2" style="margin-top:12px">
       <button class="secondary" onclick="document.getElementById('modalRoot').innerHTML=''">取消</button>
       <button class="primary" onclick="saveAddFromLibrary('${libId}')">加入食谱</button>
     </div>`);
+  setTimeout(()=>previewAddFromLibrary(libId),0);
+}
+function previewAddFromLibrary(libId){
+  const food=(state.foodLibrary||[]).find(x=>x.id===libId); if(!food) return;
+  const item=calcItemFromLibrary(food, val('addLibQty'));
+  const box=document.getElementById('addLibPreview');
+  if(box) box.innerHTML=`<b style="color:#166534">自动计算结果</b><div class="note" style="margin-top:6px">${item.qty}${esc(item.unit)}｜${item.kcal} kcal｜蛋白 ${item.p}g｜碳水 ${item.c}g｜脂肪 ${item.f}g</div>`;
 }
 function saveAddFromLibrary(libId){
   const food=(state.foodLibrary||[]).find(x=>x.id===libId); if(!food) return;
   const meal=state.plan.find(m=>m.id===val('addLibMeal')); if(!meal) return;
-  meal.items.push({id:uid(), name:food.name, qty:val('addLibQty'), unit:val('addLibUnit'), kcal:n(val('addLibKcal')), p:n(val('addLibP')), c:n(val('addLibC')), f:n(val('addLibF'))});
-  document.getElementById('modalRoot').innerHTML=''; renderAll(); showToast('已加入周期食谱');
+  const calc=calcItemFromLibrary(food, val('addLibQty'));
+  const item={id:uid(), foodLibraryId:food.id, name:food.name, ...calc};
+  const per=getFoodPer100(food);
+  if(hasPer100(food)){ item.kcalPer100=per.kcal; item.pPer100=per.protein; item.cPer100=per.carbs; item.fPer100=per.fat; item.proteinPer100=per.protein; item.carbsPer100=per.carbs; item.fatPer100=per.fat; }
+  meal.items.push(item);
+  document.getElementById('modalRoot').innerHTML=''; renderAll(); showToast('已加入食谱');
 }
 function openLibraryModal(libId){
   state.foodLibrary=state.foodLibrary||[];
-  const food=libId?state.foodLibrary.find(x=>x.id===libId):{};
+  const food=libId?applyFoodAliases(state.foodLibrary.find(x=>x.id===libId)):{};
+  const per=getPer100FromFood(food||{});
+  const unitMode=food?.unitMode || (per.kcal||per.p||per.c||per.f?'per100g':'manual');
   openModal(`<h3>${libId?'修改食材库':'新增食材库'}</h3>
     <div class="formGrid">
-      ${field('分类','libCat',food?.cat||'自定义','text','full')}
+      ${field('分类','libCat',food?.category||food?.cat||'自定义','text','full')}
       ${field('名称','libName',food?.name||'','text','full')}
-      ${field('默认数量','libQty',food?.qty||100,'number')}
-      ${field('单位','libUnit',food?.unit||'g','text')}
-      ${field('热量 kcal','libKcal',food?.kcal||'','number')}
-      ${field('蛋白 g','libP',food?.p||'','number')}
-      ${field('碳水 g','libC',food?.c||'','number')}
-      ${field('脂肪 g','libF',food?.f||'','number')}
+      <div class="inputWrap full"><label>参数模式</label><select id="libUnitMode"><option value="per100g" ${unitMode==='per100g'?'selected':''}>每100g参数</option><option value="manual" ${unitMode==='manual'?'selected':''}>手动默认份量</option></select></div>
+      ${field('默认实际吃多少','libQty',food?.defaultAmount||food?.qty||100,'number')}
+      ${field('默认单位','libUnit',food?.defaultUnit||food?.unit||'g','text')}
+      ${field('默认热量 kcal','libKcal',food?.kcal||'','number')}
+      ${field('默认蛋白 g','libP',food?.p||'','number')}
+      ${field('默认碳水 g','libC',food?.c||'','number')}
+      ${field('默认脂肪 g','libF',food?.f||'','number')}
+      ${field('每100g热量 kcal','libKcal100',per.kcal||'','number')}
+      ${field('每100g蛋白 g','libP100',per.p||'','number')}
+      ${field('每100g碳水 g','libC100',per.c||'','number')}
+      ${field('每100g脂肪 g','libF100',per.f||'','number')}
     </div>
-    <p class="note" style="margin-top:10px">这里是“默认份量”的营养值，不一定是100g。比如米糊你常吃30g，就可以直接设成30g对应参数。</p>
+    <p class="note" style="margin-top:10px">食材库负责长期保存每100g参数。保存后再次添加米糊、燕麦、蛋白粉时，只改实际克数即可自动换算。</p>
     <div class="grid2" style="margin-top:12px">
       ${libId?`<button class="secondary danger" onclick="deleteLibraryFood('${libId}')">删除</button>`:`<button class="secondary" onclick="document.getElementById('modalRoot').innerHTML=''">取消</button>`}
       <button class="primary" onclick="saveLibraryFood('${libId||''}')">保存</button>
@@ -1242,10 +1354,25 @@ function openLibraryModal(libId){
 }
 function saveLibraryFood(libId){
   state.foodLibrary=state.foodLibrary||[];
-  const obj={id:libId||uid(), cat:val('libCat')||'自定义', name:val('libName')||'食材', qty:val('libQty'), unit:val('libUnit')||'g', kcal:n(val('libKcal')), p:n(val('libP')), c:n(val('libC')), f:n(val('libF'))};
+  const old=libId?state.foodLibrary.find(x=>x.id===libId):null;
+  const obj=applyFoodAliases({id:libId||uid(), cat:val('libCat')||'自定义', category:val('libCat')||'自定义', name:val('libName')||'食材', qty:n(val('libQty')), unit:val('libUnit')||'g', defaultAmount:n(val('libQty')), defaultUnit:val('libUnit')||'g', kcal:n(val('libKcal')), p:n(val('libP')), c:n(val('libC')), f:n(val('libF')), protein:n(val('libP')), carbs:n(val('libC')), fat:n(val('libF')), unitMode:val('libUnitMode')||'per100g', kcalPer100:n(val('libKcal100')), proteinPer100:n(val('libP100')), carbsPer100:n(val('libC100')), fatPer100:n(val('libF100')), updatedAt:new Date().toISOString()});
+  if(obj.unitMode==='per100g' && isGramUnit(obj.defaultUnit) && hasPer100(obj)){
+    const calc=calcItemFromLibrary(obj,obj.defaultAmount);
+    obj.kcal=calc.kcal; obj.p=calc.p; obj.c=calc.c; obj.f=calc.f; obj.protein=calc.p; obj.carbs=calc.c; obj.fat=calc.f;
+  }
   if(libId){ const i=state.foodLibrary.findIndex(x=>x.id===libId); if(i>=0) state.foodLibrary[i]=obj; }
   else state.foodLibrary.push(obj);
+  const changed=old && ['kcalPer100','proteinPer100','carbsPer100','fatPer100','unitMode'].some(k=>String(applyFoodAliases(old)[k]??'')!==String(obj[k]??''));
+  if(changed && confirm('食材库参数已更新。是否同步更新所有使用该食材的食谱项？')) syncLibraryFoodToPlan(obj.id);
   document.getElementById('modalRoot').innerHTML=''; renderAll(); showToast('食材库已保存');
+}
+function syncLibraryFoodToPlan(libId){
+  const food=(state.foodLibrary||[]).find(x=>x.id===libId); if(!food) return;
+  let count=0;
+  state.plan.forEach(meal=>(meal.items||[]).forEach(item=>{
+    if(item.foodLibraryId===libId){ recalcPlanItemFromLibrary(item, food); count++; }
+  }));
+  showToast(count?`已同步 ${count} 个食谱项`:'没有需要同步的食谱项');
 }
 function deleteLibraryFood(libId){
   if(!confirm('删除这个食材库项目？不会删除已经加入周期食谱的项目。')) return;
@@ -1277,24 +1404,91 @@ function findItem(id){
   for(const meal of state.plan){ const item=meal.items.find(i=>i.id===id); if(item) return {meal,item}; }
   return {};
 }
+function isGramUnit(unit){ return String(unit||'').trim().toLowerCase()==='g'; }
+function getPer100FromFood(item){
+  const qty=n(item?.qty ?? item?.amount);
+  if(hasPer100(item)){
+    const per=getFoodPer100(item);
+    return {kcal:per.kcal,p:per.protein,c:per.carbs,f:per.fat};
+  }
+  if(isGramUnit(item?.unit || item?.defaultUnit) && qty>0){
+    return {kcal:round1(n(item.kcal)*100/qty),p:round1(n(item.p ?? item.protein)*100/qty),c:round1(n(item.c ?? item.carbs)*100/qty),f:round1(n(item.f ?? item.fat)*100/qty)};
+  }
+  return {kcal:'',p:'',c:'',f:''};
+}
+function getDraftFood(){
+  const amount=n(val('foodQty'));
+  const obj={foodLibraryId:val('foodLibraryId'),name:val('foodName')||'食材',qty:amount,amount,unit:val('foodUnit')||'g',kcal:n(val('foodKcal')),p:n(val('foodP')),c:n(val('foodC')),f:n(val('foodF')),protein:n(val('foodP')),carbs:n(val('foodC')),fat:n(val('foodF'))};
+  const per=getPer100Inputs();
+  if(per.hasAny){ obj.kcalPer100=per.kcal; obj.pPer100=per.p; obj.cPer100=per.c; obj.fPer100=per.f; obj.proteinPer100=per.p; obj.carbsPer100=per.c; obj.fatPer100=per.f; }
+  return obj;
+}
+function getPer100Inputs(){
+  const kcal=n(val('labelKcal100')), p100=n(val('labelP100')), c100=n(val('labelC100')), f100=n(val('labelF100'));
+  return {kcal,p:p100,c:c100,f:f100,hasAny:!!(kcal||p100||c100||f100)};
+}
+function setOfficialNutritionFromPer100(){
+  const g=n(val('labelEatG'));
+  const per=getPer100Inputs();
+  if(g<=0 || !per.hasAny) return false;
+  document.getElementById('foodQty').value=round2(g);
+  document.getElementById('foodUnit').value='g';
+  document.getElementById('foodKcal').value=Math.max(0,Math.round(per.kcal*g/100));
+  document.getElementById('foodP').value=Math.max(0,round1(per.p*g/100));
+  document.getElementById('foodC').value=Math.max(0,round1(per.c*g/100));
+  document.getElementById('foodF').value=Math.max(0,round1(per.f*g/100));
+  renderPer100Hint('已按每100g背标同步到正式食材字段。');
+  return true;
+}
+function renderPer100Hint(msg){
+  const el=document.getElementById('per100Hint');
+  if(el) el.textContent=msg||'';
+}
+function syncPer100FromQty(){
+  const unit=val('foodUnit');
+  const qty=n(val('foodQty'));
+  if(isGramUnit(unit)){
+    const eat=document.getElementById('labelEatG');
+    if(eat) eat.value=round2(qty);
+    if(getPer100Inputs().hasAny) setOfficialNutritionFromPer100();
+    else renderPer100Hint('单位是 g。填写每100g背标后，修改数量会自动重算营养。');
+  }else{
+    renderPer100Hint('当前单位不是 g，可手动填写数量和营养；需要背标换算时会自动切换为 g。');
+  }
+}
+function syncPer100FromInputs(){
+  if(!isGramUnit(val('foodUnit'))){
+    renderPer100Hint('当前单位不是 g。点击“按每100g自动换算”会把单位切换为 g 并写入正式字段。');
+    return;
+  }
+  setOfficialNutritionFromPer100();
+}
 function openFoodModal(itemId, mealId){
-  const found=itemId?findItem(itemId):{}; const item=found.item||{};
+  const found=itemId?findItem(itemId):{}; const item=applyItemAliases(found.item||{});
   const targetMeal=mealId||found.meal?.id||state.plan[0]?.id;
+  const linkedFood=item.foodLibraryId?(state.foodLibrary||[]).find(x=>x.id===item.foodLibraryId):null;
+  const per=getPer100FromFood(linkedFood||item);
+  const labelEat=isGramUnit(item.unit) ? (item.qty||30) : 30;
   openModal(`<h3>${itemId?'修改食材项':'新增食材项'}</h3>
+    <input id="foodLibraryId" type="hidden" value="${esc(item.foodLibraryId||'')}">
+    <div class="listItem">
+      <div class="title">食材库参数：${linkedFood?'<span class="badge green">已保存</span>':'<span class="badge orange">未保存</span>'}</div>
+      <div class="meta">${linkedFood?'来自食材库：'+esc(linkedFood.name):'保存到食材库后，下次只需要改实际克数。'}</div>
+    </div>
     <div class="formGrid">
       <div class="inputWrap full"><label>所属餐次</label><select id="foodMeal">${state.plan.map(m=>`<option value="${m.id}" ${m.id===targetMeal?'selected':''}>${esc(m.name)}</option>`).join('')}</select></div>
 
       <div class="inputWrap full">
         <label>搜索食材库 / 名称</label>
-        <input id="foodName" value="${esc(item.name||'')}" placeholder="比如：燕麦、米糊、鸡蛋、牛肉、米饭" oninput="searchFoodLibrary(this.value)">
+        <input id="foodName" value="${esc(item.name||'')}" placeholder="比如：燕麦、米糊、鸡蛋、牛肉、米饭" oninput="document.getElementById('foodLibraryId').value='';searchFoodLibrary(this.value)">
         <div class="quickSearch">
           ${['燕麦','米糊','鸡蛋','米饭','鸡胸','牛肉','香蕉','苹果','酸奶','橄榄油'].map(x=>`<button type="button" onclick="quickSearchFood('${x}')">${x}</button>`).join('')}
         </div>
         <div id="foodSuggest" class="suggestBox hidden"></div>
       </div>
 
-      ${field('数量','foodQty',item.qty||'','number')}
-      ${field('单位','foodUnit',item.unit||'g','text')}
+      <div class="inputWrap"><label>数量</label><input id="foodQty" type="number" value="${esc(item.qty||'')}" oninput="syncPer100FromQty()"></div>
+      <div class="inputWrap"><label>单位</label><input id="foodUnit" type="text" value="${esc(item.unit||'g')}" oninput="syncPer100FromQty()"></div>
       ${field('热量 kcal','foodKcal',item.kcal||'','number')}
       ${field('蛋白 g','foodP',item.p||'','number')}
       ${field('碳水 g','foodC',item.c||'','number')}
@@ -1302,36 +1496,33 @@ function openFoodModal(itemId, mealId){
     </div>
 
     <div class="calcBox">
-      <b>背标换算器：每100g → 实际克数</b>
-      <p class="note" style="margin:6px 0 8px">把包装背标填进去，比如每100g热量/蛋白/碳水/脂肪，再填你实际吃多少g，会自动换算并填到上面。</p>
+      <b>按每100g自动换算</b>
+      <p class="note" style="margin:6px 0 8px">背标换算器不是独立小工具。它会把结果同步写入上面的正式食材字段，食谱配平、今日执行和历史记录都读取上面的字段。</p>
       <div class="formGrid">
-        ${field('实际吃多少 g','labelEatG',item.qty||30,'number')}
-        ${field('每100g热量 kcal','labelKcal100','','number')}
-        ${field('每100g蛋白 g','labelP100','','number')}
-        ${field('每100g碳水 g','labelC100','','number')}
-        ${field('每100g脂肪 g','labelF100','','number')}
-        <button class="primary full" style="height:42px;border-radius:14px" onclick="applyPer100Calc()">自动换算并填入</button>
+        <div class="inputWrap"><label>实际吃多少 g</label><input id="labelEatG" type="number" value="${esc(labelEat)}" oninput="syncPer100FromInputs()"></div>
+        <div class="inputWrap"><label>每100g热量 kcal</label><input id="labelKcal100" type="number" value="${esc(per.kcal)}" oninput="syncPer100FromInputs()"></div>
+        <div class="inputWrap"><label>每100g蛋白 g</label><input id="labelP100" type="number" value="${esc(per.p)}" oninput="syncPer100FromInputs()"></div>
+        <div class="inputWrap"><label>每100g碳水 g</label><input id="labelC100" type="number" value="${esc(per.c)}" oninput="syncPer100FromInputs()"></div>
+        <div class="inputWrap"><label>每100g脂肪 g</label><input id="labelF100" type="number" value="${esc(per.f)}" oninput="syncPer100FromInputs()"></div>
+        <button class="primary full" style="height:42px;border-radius:14px" onclick="applyPer100Calc()">按每100g自动换算</button>
       </div>
+      <div id="per100Hint" class="note" style="margin-top:8px"></div>
     </div>
 
-    <p class="note" style="margin-top:10px">食材库只是估算。精确记录时，用包装背标换算器覆盖上面的参数。</p>
+    <p class="note" style="margin-top:10px">估算值清楚、同步稳定，比专业数据库更重要。保存后所有页面都以正式字段 qty / unit / kcal / p / c / f 为准。</p>
     <div class="grid2" style="margin-top:12px">
       ${itemId?`<button class="secondary danger" onclick="deleteFood('${itemId}')">删除</button>`:`<button class="secondary" onclick="document.getElementById('modalRoot').innerHTML=''">取消</button>`}
-      <button class="primary" onclick="saveFood('${itemId||''}')">保存</button>
+      <button class="primary" onclick="saveFood('${itemId||''}')">保存本食谱项</button>
+    </div>
+    <button class="primary" style="width:100%;margin-top:8px" onclick="saveCurrentFoodToLibraryAndApply('${itemId||''}')">保存到食材库并应用</button>
     </div>`);
   if(!itemId) setTimeout(()=>searchFoodLibrary(''), 0);
+  setTimeout(()=>syncPer100FromQty(), 0);
 }
 function applyPer100Calc(){
-  const g=n(val('labelEatG'));
-  const k100=n(val('labelKcal100')), p100=n(val('labelP100')), c100=n(val('labelC100')), f100=n(val('labelF100'));
-  const ratio=g/100;
-  document.getElementById('foodQty').value=g;
-  document.getElementById('foodUnit').value='g';
-  document.getElementById('foodKcal').value=Math.round(k100*ratio);
-  document.getElementById('foodP').value=round1(p100*ratio);
-  document.getElementById('foodC').value=round1(c100*ratio);
-  document.getElementById('foodF').value=round1(f100*ratio);
+  if(!setOfficialNutritionFromPer100()) showToast('请填写实际克数和每100g背标参数');
 }
+function round2(x){ return Math.round((Number(x)||0)*100)/100; }
 function round1(x){ return Math.round((Number(x)||0)*10)/10; }
 function quickSearchFood(q){
   document.getElementById('foodName').value=q;
@@ -1354,22 +1545,64 @@ function searchFoodLibrary(q){
 }
 function applyFoodSuggestion(id){
   const x=(state.foodLibrary||[]).find(v=>v.id===id); if(!x) return;
+  const calc=calcItemFromLibrary(x, x.defaultAmount || x.qty);
+  document.getElementById('foodLibraryId').value=x.id;
   document.getElementById('foodName').value=x.name;
-  document.getElementById('foodQty').value=x.qty;
-  document.getElementById('foodUnit').value=x.unit;
-  document.getElementById('foodKcal').value=x.kcal;
-  document.getElementById('foodP').value=x.p;
-  document.getElementById('foodC').value=x.c;
-  document.getElementById('foodF').value=x.f;
+  document.getElementById('foodQty').value=calc.qty;
+  document.getElementById('foodUnit').value=calc.unit;
+  document.getElementById('foodKcal').value=calc.kcal;
+  document.getElementById('foodP').value=calc.p;
+  document.getElementById('foodC').value=calc.c;
+  document.getElementById('foodF').value=calc.f;
+  const per=getPer100FromFood(x);
+  document.getElementById('labelEatG').value=isGramUnit(x.unit)?x.qty:30;
+  document.getElementById('labelKcal100').value=per.kcal;
+  document.getElementById('labelP100').value=per.p;
+  document.getElementById('labelC100').value=per.c;
+  document.getElementById('labelF100').value=per.f;
+  syncPer100FromQty();
   const box=document.getElementById('foodSuggest'); if(box) box.classList.add('hidden');
 }
 function saveFood(id){
   const mealId=val('foodMeal');
   let item=id?findItem(id).item:{id:uid()};
-  Object.assign(item,{name:val('foodName')||'食材',qty:val('foodQty'),unit:val('foodUnit')||'g',kcal:n(val('foodKcal')),p:n(val('foodP')),c:n(val('foodC')),f:n(val('foodF'))});
+  Object.assign(item,getDraftFood());
   state.plan.forEach(m=>m.items=m.items.filter(i=>i.id!==item.id));
   state.plan.find(m=>m.id===mealId).items.push(item);
   document.getElementById('modalRoot').innerHTML=''; renderAll(); showToast('食材已保存');
+}
+function saveCurrentFoodToLibraryAndApply(id){
+  const draft=getDraftFood();
+  const existing=draft.foodLibraryId?(state.foodLibrary||[]).find(x=>x.id===draft.foodLibraryId):(state.foodLibrary||[]).find(x=>x.name===draft.name);
+  const per=getPer100Inputs();
+  const lib=applyFoodAliases({
+    id:existing?.id||uid(),
+    name:draft.name,
+    cat:existing?.cat||existing?.category||'自定义',
+    category:existing?.category||existing?.cat||'自定义',
+    unitMode:(isGramUnit(draft.unit)&&per.hasAny)?'per100g':'manual',
+    defaultAmount:draft.amount,
+    defaultUnit:draft.unit,
+    qty:draft.amount,
+    unit:draft.unit,
+    kcal:draft.kcal,
+    p:draft.p,
+    c:draft.c,
+    f:draft.f,
+    protein:draft.p,
+    carbs:draft.c,
+    fat:draft.f,
+    kcalPer100:per.kcal,
+    proteinPer100:per.p,
+    carbsPer100:per.c,
+    fatPer100:per.f,
+    updatedAt:new Date().toISOString()
+  });
+  const idx=state.foodLibrary.findIndex(x=>x.id===lib.id);
+  if(idx>=0) state.foodLibrary[idx]=lib; else state.foodLibrary.push(lib);
+  document.getElementById('foodLibraryId').value=lib.id;
+  saveFood(id);
+  showToast('保存成功，食材库已更新');
 }
 function deleteFood(id){
   if(!confirm('删除这个食材项？')) return;
